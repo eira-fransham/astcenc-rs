@@ -9,7 +9,7 @@
 
 #![warn(missing_docs)]
 
-use std::{convert::TryInto, mem::MaybeUninit, ops::Deref, ptr::NonNull};
+use std::{convert::TryInto, mem::MaybeUninit, ops::Deref, ops::DerefMut, ptr::NonNull};
 
 /// An error during initialization, compression or decompression.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -346,7 +346,24 @@ where
             dim_z: self.extents.z,
             dim_pad: self.border_padding,
             data_type: D::TYPE.into_sys(),
-            data: &*self as *const _ as *mut _,
+            data: self.data.as_ptr() as *mut _,
+        }
+    }
+}
+
+impl<D, T> Image<T>
+where
+    T: DerefMut<Target = [D]>,
+    D: DataType,
+{
+    fn as_sys_mut(&mut self) -> astcenc_sys::astcenc_image {
+        astcenc_sys::astcenc_image {
+            dim_x: self.extents.x,
+            dim_y: self.extents.y,
+            dim_z: self.extents.z,
+            dim_pad: self.border_padding,
+            data_type: D::TYPE.into_sys(),
+            data: self.data.as_mut_ptr() as *mut _,
         }
     }
 }
@@ -486,7 +503,7 @@ impl Context {
         const BYTES_PER_BLOCK: usize = 16;
 
         if image.data.as_ref().len()
-            != (image.extents.x * image.extents.y * image.extents.z) as usize
+            != (image.extents.x * image.extents.y * image.extents.z * 4) as usize
         {
             return Err(Error::BadParam);
         }
@@ -516,6 +533,63 @@ impl Context {
         unsafe { out.set_len(bytes.try_into().map_err(|_| Error::OutOfMem)?) };
 
         self.reset()?;
+
+        Ok(out)
+    }
+
+    /// Decompress an image into a pre-existing buffer. The metadata (size and border padding) must
+    /// already be set and enough space must be reserved in `out.data` for the output pixels (RGBA).
+    pub fn decompress_into<D, T>(
+        &mut self,
+        data: &[u8],
+        out: &mut Image<T>,
+        swizzle: Swizzle,
+    ) -> Result<(), Error>
+    where
+        D: DataType,
+        T: DerefMut<Target = [D]>,
+    {
+        error_code_to_result(unsafe {
+            astcenc_sys::astcenc_decompress_image(
+                self.inner.as_mut(),
+                data.as_ptr(),
+                data.len() as u64,
+                &mut out.as_sys_mut(),
+                swizzle.into_sys(),
+            )
+        })
+    }
+
+    /// Decompress an image. The metadata is not stored in the compressed data itself, and should be
+    /// stored as a separate header.
+    pub fn decompress<D>(
+        &mut self,
+        data: &[u8],
+        extents: Extents,
+        border_padding: u32,
+        swizzle: Swizzle,
+    ) -> Result<Image<Vec<D>>, Error>
+    where
+        D: DataType,
+    {
+        let size = (extents.x * extents.y * extents.z * 4) as usize;
+        let mut out = Image {
+            extents,
+            border_padding,
+            data: Vec::with_capacity(size),
+        };
+
+        error_code_to_result(unsafe {
+            astcenc_sys::astcenc_decompress_image(
+                self.inner.as_mut(),
+                data.as_ptr(),
+                data.len() as u64,
+                &mut out.as_sys_mut(),
+                swizzle.into_sys(),
+            )
+        })?;
+
+        unsafe { out.data.set_len(size) };
 
         Ok(out)
     }
