@@ -67,9 +67,15 @@ pub struct Context {
 unsafe impl Sync for Context {}
 unsafe impl Send for Context {}
 
+impl Default for Context {
+    fn default() -> Self {
+        Self::new(Config::default()).unwrap()
+    }
+}
+
 /// A 3-dimensional set of width, height and depth. ASTC supports 3D images, so we
 /// always have to specify the depth of an image.
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Extents {
     /// Width
     pub x: u32,
@@ -162,6 +168,12 @@ impl Profile {
 /// Configuration for initializing `Context`, see `ConfigBuilder` for more information.
 pub struct Config {
     inner: astcenc_sys::astcenc_config,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        ConfigBuilder::default().build().unwrap()
+    }
 }
 
 /// Builder for the context configuration.
@@ -324,6 +336,7 @@ impl DataType for half::f16 {
 /// The 3D image type. Each pixel should be RGBA. The data can be anything that dereferences to a
 /// flat array of color components, as long as the color components are in one of the supported
 /// formats. For HDR images, `f32` or `half::f16` must be used.
+#[derive(Default)]
 pub struct Image<T> {
     /// The dimensions of the image, not including padding. This _must_ match the length of the data.
     pub extents: Extents,
@@ -404,6 +417,7 @@ impl Selector {
 
 /// A component selection swizzle. The image must always be in RGBA order, even if the G, B
 /// and/or A components are never used.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Swizzle {
     /// The component to use for the red channel.
     pub r: Selector,
@@ -629,5 +643,20 @@ impl Flags {
 impl Default for Flags {
     fn default() -> Self {
         Flags::USE_ALPHA_WEIGHT
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn linked_correctly() {
+        let mut img = super::Image::<Vec<u8>>::default();
+
+        let mut ctx = super::Context::default();
+        let swz = super::Swizzle::rgba();
+
+        let data = ctx.compress(&img, swz).unwrap();
+
+        ctx.decompress_into(&data, &mut img, swz).unwrap();
     }
 }
