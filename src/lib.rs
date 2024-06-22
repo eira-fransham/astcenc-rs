@@ -9,7 +9,7 @@
 
 #![warn(missing_docs)]
 
-use std::{convert::TryInto, mem::MaybeUninit, ops::Deref, ops::DerefMut, ptr::NonNull};
+use std::{mem::MaybeUninit, ops::Deref, ops::DerefMut, ptr::NonNull};
 
 /// An error during initialization, compression or decompression.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -21,13 +21,13 @@ pub enum Error {
     /// > TODO: The CPU has incomplete float support somehow
     BadCpuFloat,
     /// The library was compiled for ISA incompatible with the ISA that we're running on.
-    BadCpuIsa,
+    BadDecodeMode,
     /// The flags are contradictory or otherwise incorrect.
     BadFlags,
     /// A bad parameter was supplied
     BadParam,
     /// The supplied preset is unsupported
-    BadPreset,
+    BadQuality,
     /// The supplied profile is unsupported
     BadProfile,
     /// The supplied swizzle is unsupported
@@ -46,10 +46,10 @@ fn error_code_to_result(code: astcenc_sys::astcenc_error) -> Result<(), Error> {
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_BLOCK_SIZE => Err(Error::BadBlockSize),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_CONTEXT => Err(Error::BadContext),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_CPU_FLOAT => Err(Error::BadCpuFloat),
-        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_CPU_ISA => Err(Error::BadCpuIsa),
+        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_DECODE_MODE => Err(Error::BadDecodeMode),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_FLAGS => Err(Error::BadFlags),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_PARAM => Err(Error::BadParam),
-        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_PRESET => Err(Error::BadPreset),
+        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_QUALITY => Err(Error::BadQuality),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_PROFILE => Err(Error::BadProfile),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_SWIZZLE => Err(Error::BadSwizzle),
         astcenc_sys::astcenc_error_ASTCENC_ERR_NOT_IMPLEMENTED => Err(Error::NotImplemented),
@@ -106,34 +106,27 @@ impl Extents {
 /// The performance preset, higher settings take more time but provide higher quality.
 /// It will _not_ provide better compression at higher settings, compression is decided
 /// only by the block size.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Preset {
-    /// The fastest, but lowest-quality setting
-    Fast,
-    /// A good balance of speed and quality
-    Medium,
-    /// Slower, but higher quality
-    Thorough,
-    /// Disregard any performance concerns, focus on quality only
-    Exhaustive,
-}
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+pub struct Preset(f32);
 
 impl Default for Preset {
     fn default() -> Self {
-        Self::Medium
+        Self(astcenc_sys::ASTCENC_PRE_MEDIUM)
     }
 }
 
-impl Preset {
-    fn into_sys(self) -> astcenc_sys::astcenc_preset {
-        match self {
-            Preset::Fast => astcenc_sys::astcenc_preset_ASTCENC_PRE_FAST,
-            Preset::Medium => astcenc_sys::astcenc_preset_ASTCENC_PRE_MEDIUM,
-            Preset::Thorough => astcenc_sys::astcenc_preset_ASTCENC_PRE_THOROUGH,
-            Preset::Exhaustive => astcenc_sys::astcenc_preset_ASTCENC_PRE_EXHAUSTIVE,
-        }
-    }
-}
+/// The fastest, lowest quality, search preset.
+pub const PRESET_FASTEST: Preset = Preset(astcenc_sys::ASTCENC_PRE_FASTEST);
+/// The fast search preset.
+pub const PRESET_FAST: Preset = Preset(astcenc_sys::ASTCENC_PRE_FAST);
+/// The medium quality search preset.
+pub const PRESET_MEDIUM: Preset = Preset(astcenc_sys::ASTCENC_PRE_MEDIUM);
+/// The thorough quality search preset.
+pub const PRESET_THOROUGH: Preset = Preset(astcenc_sys::ASTCENC_PRE_THOROUGH);
+/// The thorough quality search preset.
+pub const PRESET_VERY_THOROUGH: Preset = Preset(astcenc_sys::ASTCENC_PRE_VERYTHOROUGH);
+/// The exhaustive, highest quality, search preset.
+pub const PRESET_EXHAUSTIVE: Preset = Preset(astcenc_sys::ASTCENC_PRE_EXHAUSTIVE);
 
 /// The color profile. HDR and LDR SRGB require the image to use floats for its individual colors.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -177,7 +170,7 @@ impl Default for Config {
 }
 
 /// Builder for the context configuration.
-#[derive(Clone, Hash)]
+#[derive(Clone)]
 pub struct ConfigBuilder {
     profile: Profile,
     preset: Preset,
@@ -252,7 +245,7 @@ impl ConfigBuilder {
                 self.block_size.x,
                 self.block_size.y,
                 self.block_size.z,
-                self.preset.into_sys(),
+                self.preset.0,
                 Flags::default().into_sys(),
                 cfg.as_mut_ptr(),
             )
@@ -340,9 +333,6 @@ impl DataType for half::f16 {
 pub struct Image<T> {
     /// The dimensions of the image, not including padding. This _must_ match the length of the data.
     pub extents: Extents,
-    /// The amount of padding around the edge of the image. This space should be filled by
-    /// extrapolating the nearest edge color.
-    pub border_padding: u32,
     /// The data array.
     pub data: T,
 }
@@ -357,7 +347,6 @@ where
             dim_x: self.extents.x,
             dim_y: self.extents.y,
             dim_z: self.extents.z,
-            dim_pad: self.border_padding,
             data_type: D::TYPE.into_sys(),
             data: self.data.as_ptr() as *mut _,
         }
@@ -374,7 +363,6 @@ where
             dim_x: self.extents.x,
             dim_y: self.extents.y,
             dim_z: self.extents.z,
-            dim_pad: self.border_padding,
             data_type: D::TYPE.into_sys(),
             data: self.data.as_mut_ptr() as *mut _,
         }
@@ -529,22 +517,22 @@ impl Context {
         let blocks_z =
             (image.extents.z + self.config.inner.block_z - 1) / self.config.inner.block_z;
 
-        let bytes = blocks_x as u64 * blocks_y as u64 * blocks_z as u64 * BYTES_PER_BLOCK as u64;
-        let mut out = Vec::with_capacity(bytes as usize);
+        let bytes = blocks_x as usize * blocks_y as usize * blocks_z as usize * BYTES_PER_BLOCK;
+        let mut out = Vec::with_capacity(bytes);
         let image_sys = image.as_sys();
 
         error_code_to_result(unsafe {
             astcenc_sys::astcenc_compress_image(
                 self.inner.as_mut(),
                 &image_sys as *const _ as *mut _,
-                swizzle.into_sys(),
+                &swizzle.into_sys(),
                 out.as_mut_ptr(),
                 bytes,
                 0,
             )
         })?;
 
-        unsafe { out.set_len(bytes.try_into().map_err(|_| Error::OutOfMem)?) };
+        unsafe { out.set_len(bytes) };
 
         self.reset()?;
 
@@ -567,9 +555,10 @@ impl Context {
             astcenc_sys::astcenc_decompress_image(
                 self.inner.as_mut(),
                 data.as_ptr(),
-                data.len() as u64,
+                data.len(),
                 &mut out.as_sys_mut(),
-                swizzle.into_sys(),
+                &swizzle.into_sys(),
+                0,
             )
         })
     }
@@ -580,7 +569,6 @@ impl Context {
         &mut self,
         data: &[u8],
         extents: Extents,
-        border_padding: u32,
         swizzle: Swizzle,
     ) -> Result<Image<Vec<D>>, Error>
     where
@@ -589,7 +577,6 @@ impl Context {
         let size = (extents.x * extents.y * extents.z * 4) as usize;
         let mut out = Image {
             extents,
-            border_padding,
             data: Vec::with_capacity(size),
         };
 
@@ -597,9 +584,10 @@ impl Context {
             astcenc_sys::astcenc_decompress_image(
                 self.inner.as_mut(),
                 data.as_ptr(),
-                data.len() as u64,
+                data.len(),
                 &mut out.as_sys_mut(),
-                swizzle.into_sys(),
+                &swizzle.into_sys(),
+                0,
             )
         })?;
 
@@ -618,9 +606,6 @@ bitflags::bitflags! {
     pub struct Flags: std::os::raw::c_uint {
         /// Disable compression support.
         const DECOMPRESS_ONLY  = astcenc_sys::ASTCENC_FLG_DECOMPRESS_ONLY;
-        /// Treat all channels independently for the purposes of error calculation
-        /// (can result in higher quality for images where the channels correlate poorly)
-        const MAP_MASK         = astcenc_sys::ASTCENC_FLG_MAP_MASK;
         /// Treat the image as a 2-component normal map for the purposes of error calculation.
         /// Z will always be recalculated.
         const MAP_NORMAL       = astcenc_sys::ASTCENC_FLG_MAP_NORMAL;
