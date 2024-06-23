@@ -17,7 +17,4 @@ bitflags = "1.2"
 half = "1.6"
 
 [dev-dependencies]
-image = "0.25.1"
-
-[patch.crates-io]
-astcenc-sys = { path = "../astcenc-sys" }
+rand = "0.8.5"
