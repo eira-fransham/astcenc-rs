@@ -336,7 +336,7 @@ impl DataType for half::f16 {
 /// formats. For HDR images, `f32` or `half::f16` must be used.
 #[derive(Default)]
 pub struct Image<T> {
-    /// The dimensions of the image, not including padding. This _must_ match the length of the data.
+    /// The dimensions of the image. This _must_ match the length of the data.
     pub extents: Extents,
     /// The data array.
     pub data: T,
@@ -470,15 +470,26 @@ impl Context {
     }
 
     /// Compress the given image, returning a byte vector that can be sent to the GPU.
-    pub fn compress<D, T>(&mut self, image: &Image<T>, swizzle: Swizzle) -> Result<Vec<u8>, Error>
+    pub fn compress<D, T, L>(
+        &mut self,
+        image: &Image<T>,
+        swizzle: Swizzle,
+    ) -> Result<Vec<u8>, Error>
     where
         D: DataType,
-        T: Deref<Target = [D]>,
+        T: Deref<Target = [L]>,
+        L: Deref<Target = [D]>,
     {
         const BYTES_PER_BLOCK: usize = 16;
 
-        if image.data.as_ref().len()
-            != (image.extents.x * image.extents.y * image.extents.z * 4) as usize
+        if image.data.len() != image.extents.z as usize {
+            return Err(Error::BadParam);
+        }
+
+        if image
+            .data
+            .iter()
+            .any(|layer| layer.len() != (image.extents.x * image.extents.y * 4) as usize)
         {
             return Err(Error::BadParam);
         }
@@ -493,13 +504,17 @@ impl Context {
         let bytes = blocks_x as usize * blocks_y as usize * blocks_z as usize * BYTES_PER_BLOCK;
         let mut out = Vec::with_capacity(bytes);
 
-        let mut image_data_pointer: *mut c_void = image.data.as_ptr() as *const _ as *mut _;
+        let mut image_data_pointers = image
+            .data
+            .iter()
+            .map(|layer| layer.as_ptr() as *const c_void)
+            .collect::<Vec<_>>();
         let mut image_sys = astcenc_sys::astcenc_image {
             dim_x: image.extents.x,
             dim_y: image.extents.y,
             dim_z: image.extents.z,
             data_type: D::TYPE.into_sys(),
-            data: &mut image_data_pointer as *mut *mut c_void,
+            data: image_data_pointers.as_mut_ptr() as *mut *mut _,
         };
 
         error_code_to_result(unsafe {
@@ -522,7 +537,7 @@ impl Context {
 
     /// Decompress an image into a pre-existing buffer. The metadata (size and border padding) must
     /// already be set and enough space must be reserved in `out.data` for the output pixels (RGBA).
-    pub fn decompress_into<D, T>(
+    pub fn decompress_into<D, T, L>(
         &mut self,
         data: &[u8],
         out: &mut Image<T>,
@@ -530,15 +545,20 @@ impl Context {
     ) -> Result<(), Error>
     where
         D: DataType,
-        T: DerefMut<Target = [D]>,
+        T: DerefMut<Target = [L]>,
+        L: DerefMut<Target = [D]>,
     {
-        let mut image_data_pointer: *mut c_void = out.data.as_ptr() as *const _ as *mut _;
+        let mut image_data_pointers = out
+            .data
+            .iter_mut()
+            .map(|layer| layer.as_mut_ptr() as *mut c_void)
+            .collect::<Vec<_>>();
         let mut image_sys = astcenc_sys::astcenc_image {
             dim_x: out.extents.x,
             dim_y: out.extents.y,
             dim_z: out.extents.z,
             data_type: D::TYPE.into_sys(),
-            data: &mut image_data_pointer as *mut *mut c_void,
+            data: image_data_pointers.as_mut_ptr(),
         };
 
         error_code_to_result(unsafe {
@@ -560,23 +580,29 @@ impl Context {
         data: &[u8],
         extents: Extents,
         swizzle: Swizzle,
-    ) -> Result<Image<Vec<D>>, Error>
+    ) -> Result<Image<Vec<Vec<D>>>, Error>
     where
         D: DataType,
     {
-        let size = (extents.x * extents.y * extents.z * 4) as usize;
+        let size_2d = (extents.x * extents.y * 4) as usize;
         let mut out = Image {
             extents,
-            data: Vec::with_capacity(size),
+            data: (0..extents.z)
+                .map(|_| Vec::with_capacity(size_2d))
+                .collect::<Vec<Vec<D>>>(),
         };
 
-        let mut image_data_pointer: *mut c_void = out.data.as_ptr() as *const _ as *mut _;
+        let mut image_data_pointers = out
+            .data
+            .iter_mut()
+            .map(|layer| layer.as_mut_ptr() as *mut c_void)
+            .collect::<Vec<_>>();
         let mut image_sys = astcenc_sys::astcenc_image {
             dim_x: out.extents.x,
             dim_y: out.extents.y,
             dim_z: out.extents.z,
             data_type: D::TYPE.into_sys(),
-            data: &mut image_data_pointer as *mut *mut c_void,
+            data: image_data_pointers.as_mut_ptr(),
         };
 
         error_code_to_result(unsafe {
@@ -590,7 +616,9 @@ impl Context {
             )
         })?;
 
-        unsafe { out.data.set_len(size) };
+        for layer in &mut out.data {
+            unsafe { layer.set_len(size_2d) };
+        }
 
         Ok(out)
     }
@@ -634,14 +662,18 @@ impl Default for Flags {
 mod tests {
     #[test]
     fn basic_works() {
-        let mut img = super::Image::<Vec<u8>>::default();
-        img.extents.x = 1 + rand::random::<u32>() % 256;
-        img.extents.y = 1 + rand::random::<u32>() % 256;
-        img.extents.z = 1;
-        img.data.resize_with(
-            (img.extents.x * img.extents.y * img.extents.z * 4) as usize,
-            rand::random,
-        );
+        let mut img = super::Image::<Vec<Vec<u8>>>::default();
+        let width = 1 + rand::random::<u32>() % 512;
+        let height = 1 + rand::random::<u32>() % 512;
+        let depth = 1 + rand::random::<u32>() % 4;
+        img.extents.x = width;
+        img.extents.y = height;
+        img.extents.z = depth;
+        img.data.resize_with(img.extents.z as usize, || {
+            (0..width * height * 4)
+                .map(|_| rand::random::<u8>())
+                .collect::<Vec<u8>>()
+        });
 
         let mut ctx = super::Context::default();
         let swz = super::Swizzle::rgba();
@@ -652,17 +684,23 @@ mod tests {
 
         assert_eq!(img.extents, img2.extents);
         assert_eq!(img.data.len(), img2.data.len());
+        assert!(img
+            .data
+            .iter()
+            .zip(img2.data.iter())
+            .all(|(a, b)| a.len() == b.len()));
 
         // ASTC being a lossy compression algorithm, we can't compare the data between the two
         // images, but we make sure that the two images are somewhat close.
         assert!(
             img.data
                 .iter()
-                .zip(img2.data.iter())
+                .flatten()
+                .zip(img2.data.iter().flatten())
                 .map(|(px1, px2)| px1.abs_diff(*px2) as f32 / u8::MAX as f32)
                 .sum::<f32>()
-                / (img.data.len() as f32)
-                < 0.3
+                / ((width * height * depth) as f32)
+                < 0.5
         );
     }
 }
