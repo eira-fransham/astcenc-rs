@@ -9,7 +9,12 @@
 
 #![warn(missing_docs)]
 
-use std::{mem::MaybeUninit, ops::{Deref, DerefMut}, os::raw::c_void, ptr::NonNull};
+use std::{
+    mem::MaybeUninit,
+    ops::{Deref, DerefMut},
+    os::raw::c_void,
+    ptr::NonNull,
+};
 
 /// An error during initialization, compression or decompression.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -75,7 +80,7 @@ impl Default for Context {
 
 /// A 3-dimensional set of width, height and depth. ASTC supports 3D images, so we
 /// always have to specify the depth of an image.
-#[derive(Default, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Extents {
     /// Width
     pub x: u32,
@@ -628,14 +633,36 @@ impl Default for Flags {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn linked_correctly() {
+    fn basic_works() {
         let mut img = super::Image::<Vec<u8>>::default();
+        img.extents.x = 1 + rand::random::<u32>() % 256;
+        img.extents.y = 1 + rand::random::<u32>() % 256;
+        img.extents.z = 1;
+        img.data.resize_with(
+            (img.extents.x * img.extents.y * img.extents.z * 4) as usize,
+            rand::random,
+        );
 
         let mut ctx = super::Context::default();
         let swz = super::Swizzle::rgba();
 
         let data = ctx.compress(&img, swz).unwrap();
 
-        ctx.decompress_into(&data, &mut img, swz).unwrap();
+        let img2 = ctx.decompress(&data, img.extents, swz).unwrap();
+
+        assert_eq!(img.extents, img2.extents);
+        assert_eq!(img.data.len(), img2.data.len());
+
+        // ASTC being a lossy compression algorithm, we can't compare the data between the two
+        // images, but we make sure that the two images are somewhat close.
+        assert!(
+            img.data
+                .iter()
+                .zip(img2.data.iter())
+                .map(|(px1, px2)| px1.abs_diff(*px2) as f32 / u8::MAX as f32)
+                .sum::<f32>()
+                / (img.data.len() as f32)
+                < 0.3
+        );
     }
 }
