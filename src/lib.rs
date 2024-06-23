@@ -337,22 +337,6 @@ pub struct Image<T> {
     pub data: T,
 }
 
-impl<D, T> Image<T>
-where
-    T: DerefMut<Target = [D]>,
-    D: DataType,
-{
-    fn as_sys_mut(&mut self) -> astcenc_sys::astcenc_image {
-        astcenc_sys::astcenc_image {
-            dim_x: self.extents.x,
-            dim_y: self.extents.y,
-            dim_z: self.extents.z,
-            data_type: D::TYPE.into_sys(),
-            data: self.data.as_mut_ptr() as *mut _,
-        }
-    }
-}
-
 /// An individual component of a swizzle.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Selector {
@@ -543,12 +527,21 @@ impl Context {
         D: DataType,
         T: DerefMut<Target = [D]>,
     {
+        let mut image_data_pointer: *mut c_void = out.data.as_ptr() as *const _ as *mut _;
+        let mut image_sys = astcenc_sys::astcenc_image {
+            dim_x: out.extents.x,
+            dim_y: out.extents.y,
+            dim_z: out.extents.z,
+            data_type: D::TYPE.into_sys(),
+            data: &mut image_data_pointer as *mut *mut c_void,
+        };
+
         error_code_to_result(unsafe {
             astcenc_sys::astcenc_decompress_image(
                 self.inner.as_mut(),
                 data.as_ptr(),
                 data.len(),
-                &mut out.as_sys_mut(),
+                &mut image_sys,
                 &swizzle.into_sys(),
                 0,
             )
@@ -572,12 +565,21 @@ impl Context {
             data: Vec::with_capacity(size),
         };
 
+        let mut image_data_pointer: *mut c_void = out.data.as_ptr() as *const _ as *mut _;
+        let mut image_sys = astcenc_sys::astcenc_image {
+            dim_x: out.extents.x,
+            dim_y: out.extents.y,
+            dim_z: out.extents.z,
+            data_type: D::TYPE.into_sys(),
+            data: &mut image_data_pointer as *mut *mut c_void,
+        };
+
         error_code_to_result(unsafe {
             astcenc_sys::astcenc_decompress_image(
                 self.inner.as_mut(),
                 data.as_ptr(),
                 data.len(),
-                &mut out.as_sys_mut(),
+                &mut image_sys,
                 &swizzle.into_sys(),
                 0,
             )
