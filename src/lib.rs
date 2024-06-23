@@ -9,7 +9,7 @@
 
 #![warn(missing_docs)]
 
-use std::{mem::MaybeUninit, ops::Deref, ops::DerefMut, ptr::NonNull};
+use std::{mem::MaybeUninit, ops::{Deref, DerefMut}, os::raw::c_void, ptr::NonNull};
 
 /// An error during initialization, compression or decompression.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -339,22 +339,6 @@ pub struct Image<T> {
 
 impl<D, T> Image<T>
 where
-    T: Deref<Target = [D]>,
-    D: DataType,
-{
-    fn as_sys(&self) -> astcenc_sys::astcenc_image {
-        astcenc_sys::astcenc_image {
-            dim_x: self.extents.x,
-            dim_y: self.extents.y,
-            dim_z: self.extents.z,
-            data_type: D::TYPE.into_sys(),
-            data: self.data.as_ptr() as *mut _,
-        }
-    }
-}
-
-impl<D, T> Image<T>
-where
     T: DerefMut<Target = [D]>,
     D: DataType,
 {
@@ -519,12 +503,20 @@ impl Context {
 
         let bytes = blocks_x as usize * blocks_y as usize * blocks_z as usize * BYTES_PER_BLOCK;
         let mut out = Vec::with_capacity(bytes);
-        let image_sys = image.as_sys();
+
+        let mut image_data_pointer: *mut c_void = image.data.as_ptr() as *const _ as *mut _;
+        let mut image_sys = astcenc_sys::astcenc_image {
+            dim_x: image.extents.x,
+            dim_y: image.extents.y,
+            dim_z: image.extents.z,
+            data_type: D::TYPE.into_sys(),
+            data: &mut image_data_pointer as *mut *mut c_void,
+        };
 
         error_code_to_result(unsafe {
             astcenc_sys::astcenc_compress_image(
                 self.inner.as_mut(),
-                &image_sys as *const _ as *mut _,
+                &mut image_sys as *mut _,
                 &swizzle.into_sys(),
                 out.as_mut_ptr(),
                 bytes,
