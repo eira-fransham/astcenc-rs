@@ -9,7 +9,12 @@
 
 #![warn(missing_docs)]
 
-use std::{convert::TryInto, mem::MaybeUninit, ops::Deref, ops::DerefMut, ptr::NonNull};
+use std::{
+    mem::MaybeUninit,
+    ops::{Deref, DerefMut},
+    os::raw::c_void,
+    ptr::NonNull,
+};
 
 /// An error during initialization, compression or decompression.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -21,13 +26,13 @@ pub enum Error {
     /// > TODO: The CPU has incomplete float support somehow
     BadCpuFloat,
     /// The library was compiled for ISA incompatible with the ISA that we're running on.
-    BadCpuIsa,
+    BadDecodeMode,
     /// The flags are contradictory or otherwise incorrect.
     BadFlags,
     /// A bad parameter was supplied
     BadParam,
     /// The supplied preset is unsupported
-    BadPreset,
+    BadQuality,
     /// The supplied profile is unsupported
     BadProfile,
     /// The supplied swizzle is unsupported
@@ -46,10 +51,10 @@ fn error_code_to_result(code: astcenc_sys::astcenc_error) -> Result<(), Error> {
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_BLOCK_SIZE => Err(Error::BadBlockSize),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_CONTEXT => Err(Error::BadContext),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_CPU_FLOAT => Err(Error::BadCpuFloat),
-        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_CPU_ISA => Err(Error::BadCpuIsa),
+        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_DECODE_MODE => Err(Error::BadDecodeMode),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_FLAGS => Err(Error::BadFlags),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_PARAM => Err(Error::BadParam),
-        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_PRESET => Err(Error::BadPreset),
+        astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_QUALITY => Err(Error::BadQuality),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_PROFILE => Err(Error::BadProfile),
         astcenc_sys::astcenc_error_ASTCENC_ERR_BAD_SWIZZLE => Err(Error::BadSwizzle),
         astcenc_sys::astcenc_error_ASTCENC_ERR_NOT_IMPLEMENTED => Err(Error::NotImplemented),
@@ -75,7 +80,7 @@ impl Default for Context {
 
 /// A 3-dimensional set of width, height and depth. ASTC supports 3D images, so we
 /// always have to specify the depth of an image.
-#[derive(Default, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Extents {
     /// Width
     pub x: u32,
@@ -106,34 +111,27 @@ impl Extents {
 /// The performance preset, higher settings take more time but provide higher quality.
 /// It will _not_ provide better compression at higher settings, compression is decided
 /// only by the block size.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Preset {
-    /// The fastest, but lowest-quality setting
-    Fast,
-    /// A good balance of speed and quality
-    Medium,
-    /// Slower, but higher quality
-    Thorough,
-    /// Disregard any performance concerns, focus on quality only
-    Exhaustive,
-}
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+pub struct Preset(f32);
 
 impl Default for Preset {
     fn default() -> Self {
-        Self::Medium
+        Self(astcenc_sys::ASTCENC_PRE_MEDIUM)
     }
 }
 
-impl Preset {
-    fn into_sys(self) -> astcenc_sys::astcenc_preset {
-        match self {
-            Preset::Fast => astcenc_sys::astcenc_preset_ASTCENC_PRE_FAST,
-            Preset::Medium => astcenc_sys::astcenc_preset_ASTCENC_PRE_MEDIUM,
-            Preset::Thorough => astcenc_sys::astcenc_preset_ASTCENC_PRE_THOROUGH,
-            Preset::Exhaustive => astcenc_sys::astcenc_preset_ASTCENC_PRE_EXHAUSTIVE,
-        }
-    }
-}
+/// The fastest, lowest quality, search preset.
+pub const PRESET_FASTEST: Preset = Preset(astcenc_sys::ASTCENC_PRE_FASTEST);
+/// The fast search preset.
+pub const PRESET_FAST: Preset = Preset(astcenc_sys::ASTCENC_PRE_FAST);
+/// The medium quality search preset.
+pub const PRESET_MEDIUM: Preset = Preset(astcenc_sys::ASTCENC_PRE_MEDIUM);
+/// The thorough quality search preset.
+pub const PRESET_THOROUGH: Preset = Preset(astcenc_sys::ASTCENC_PRE_THOROUGH);
+/// The thorough quality search preset.
+pub const PRESET_VERY_THOROUGH: Preset = Preset(astcenc_sys::ASTCENC_PRE_VERYTHOROUGH);
+/// The exhaustive, highest quality, search preset.
+pub const PRESET_EXHAUSTIVE: Preset = Preset(astcenc_sys::ASTCENC_PRE_EXHAUSTIVE);
 
 /// The color profile. HDR and LDR SRGB require the image to use floats for its individual colors.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -177,7 +175,7 @@ impl Default for Config {
 }
 
 /// Builder for the context configuration.
-#[derive(Clone, Hash)]
+#[derive(Clone)]
 pub struct ConfigBuilder {
     profile: Profile,
     preset: Preset,
@@ -252,7 +250,7 @@ impl ConfigBuilder {
                 self.block_size.x,
                 self.block_size.y,
                 self.block_size.z,
-                self.preset.into_sys(),
+                self.preset.0,
                 Flags::default().into_sys(),
                 cfg.as_mut_ptr(),
             )
@@ -338,47 +336,10 @@ impl DataType for half::f16 {
 /// formats. For HDR images, `f32` or `half::f16` must be used.
 #[derive(Default)]
 pub struct Image<T> {
-    /// The dimensions of the image, not including padding. This _must_ match the length of the data.
+    /// The dimensions of the image. This _must_ match the length of the data.
     pub extents: Extents,
-    /// The amount of padding around the edge of the image. This space should be filled by
-    /// extrapolating the nearest edge color.
-    pub border_padding: u32,
     /// The data array.
     pub data: T,
-}
-
-impl<D, T> Image<T>
-where
-    T: Deref<Target = [D]>,
-    D: DataType,
-{
-    fn as_sys(&self) -> astcenc_sys::astcenc_image {
-        astcenc_sys::astcenc_image {
-            dim_x: self.extents.x,
-            dim_y: self.extents.y,
-            dim_z: self.extents.z,
-            dim_pad: self.border_padding,
-            data_type: D::TYPE.into_sys(),
-            data: self.data.as_ptr() as *mut _,
-        }
-    }
-}
-
-impl<D, T> Image<T>
-where
-    T: DerefMut<Target = [D]>,
-    D: DataType,
-{
-    fn as_sys_mut(&mut self) -> astcenc_sys::astcenc_image {
-        astcenc_sys::astcenc_image {
-            dim_x: self.extents.x,
-            dim_y: self.extents.y,
-            dim_z: self.extents.z,
-            dim_pad: self.border_padding,
-            data_type: D::TYPE.into_sys(),
-            data: self.data.as_mut_ptr() as *mut _,
-        }
-    }
 }
 
 /// An individual component of a swizzle.
@@ -509,15 +470,26 @@ impl Context {
     }
 
     /// Compress the given image, returning a byte vector that can be sent to the GPU.
-    pub fn compress<D, T>(&mut self, image: &Image<T>, swizzle: Swizzle) -> Result<Vec<u8>, Error>
+    pub fn compress<D, T, L>(
+        &mut self,
+        image: &Image<T>,
+        swizzle: Swizzle,
+    ) -> Result<Vec<u8>, Error>
     where
         D: DataType,
-        T: Deref<Target = [D]>,
+        T: Deref<Target = [L]>,
+        L: Deref<Target = [D]>,
     {
         const BYTES_PER_BLOCK: usize = 16;
 
-        if image.data.as_ref().len()
-            != (image.extents.x * image.extents.y * image.extents.z * 4) as usize
+        if image.data.len() != image.extents.z as usize {
+            return Err(Error::BadParam);
+        }
+
+        if image
+            .data
+            .iter()
+            .any(|layer| layer.len() != (image.extents.x * image.extents.y * 4) as usize)
         {
             return Err(Error::BadParam);
         }
@@ -529,22 +501,34 @@ impl Context {
         let blocks_z =
             (image.extents.z + self.config.inner.block_z - 1) / self.config.inner.block_z;
 
-        let bytes = blocks_x as u64 * blocks_y as u64 * blocks_z as u64 * BYTES_PER_BLOCK as u64;
-        let mut out = Vec::with_capacity(bytes as usize);
-        let image_sys = image.as_sys();
+        let bytes = blocks_x as usize * blocks_y as usize * blocks_z as usize * BYTES_PER_BLOCK;
+        let mut out = Vec::with_capacity(bytes);
+
+        let mut image_data_pointers = image
+            .data
+            .iter()
+            .map(|layer| layer.as_ptr() as *const c_void)
+            .collect::<Vec<_>>();
+        let mut image_sys = astcenc_sys::astcenc_image {
+            dim_x: image.extents.x,
+            dim_y: image.extents.y,
+            dim_z: image.extents.z,
+            data_type: D::TYPE.into_sys(),
+            data: image_data_pointers.as_mut_ptr() as *mut *mut _,
+        };
 
         error_code_to_result(unsafe {
             astcenc_sys::astcenc_compress_image(
                 self.inner.as_mut(),
-                &image_sys as *const _ as *mut _,
-                swizzle.into_sys(),
+                &mut image_sys as *mut _,
+                &swizzle.into_sys(),
                 out.as_mut_ptr(),
                 bytes,
                 0,
             )
         })?;
 
-        unsafe { out.set_len(bytes.try_into().map_err(|_| Error::OutOfMem)?) };
+        unsafe { out.set_len(bytes) };
 
         self.reset()?;
 
@@ -553,7 +537,7 @@ impl Context {
 
     /// Decompress an image into a pre-existing buffer. The metadata (size and border padding) must
     /// already be set and enough space must be reserved in `out.data` for the output pixels (RGBA).
-    pub fn decompress_into<D, T>(
+    pub fn decompress_into<D, T, L>(
         &mut self,
         data: &[u8],
         out: &mut Image<T>,
@@ -561,15 +545,30 @@ impl Context {
     ) -> Result<(), Error>
     where
         D: DataType,
-        T: DerefMut<Target = [D]>,
+        T: DerefMut<Target = [L]>,
+        L: DerefMut<Target = [D]>,
     {
+        let mut image_data_pointers = out
+            .data
+            .iter_mut()
+            .map(|layer| layer.as_mut_ptr() as *mut c_void)
+            .collect::<Vec<_>>();
+        let mut image_sys = astcenc_sys::astcenc_image {
+            dim_x: out.extents.x,
+            dim_y: out.extents.y,
+            dim_z: out.extents.z,
+            data_type: D::TYPE.into_sys(),
+            data: image_data_pointers.as_mut_ptr(),
+        };
+
         error_code_to_result(unsafe {
             astcenc_sys::astcenc_decompress_image(
                 self.inner.as_mut(),
                 data.as_ptr(),
-                data.len() as u64,
-                &mut out.as_sys_mut(),
-                swizzle.into_sys(),
+                data.len(),
+                &mut image_sys,
+                &swizzle.into_sys(),
+                0,
             )
         })
     }
@@ -580,30 +579,46 @@ impl Context {
         &mut self,
         data: &[u8],
         extents: Extents,
-        border_padding: u32,
         swizzle: Swizzle,
-    ) -> Result<Image<Vec<D>>, Error>
+    ) -> Result<Image<Vec<Vec<D>>>, Error>
     where
         D: DataType,
     {
-        let size = (extents.x * extents.y * extents.z * 4) as usize;
+        let size_2d = (extents.x * extents.y * 4) as usize;
         let mut out = Image {
             extents,
-            border_padding,
-            data: Vec::with_capacity(size),
+            data: (0..extents.z)
+                .map(|_| Vec::with_capacity(size_2d))
+                .collect::<Vec<Vec<D>>>(),
+        };
+
+        let mut image_data_pointers = out
+            .data
+            .iter_mut()
+            .map(|layer| layer.as_mut_ptr() as *mut c_void)
+            .collect::<Vec<_>>();
+        let mut image_sys = astcenc_sys::astcenc_image {
+            dim_x: out.extents.x,
+            dim_y: out.extents.y,
+            dim_z: out.extents.z,
+            data_type: D::TYPE.into_sys(),
+            data: image_data_pointers.as_mut_ptr(),
         };
 
         error_code_to_result(unsafe {
             astcenc_sys::astcenc_decompress_image(
                 self.inner.as_mut(),
                 data.as_ptr(),
-                data.len() as u64,
-                &mut out.as_sys_mut(),
-                swizzle.into_sys(),
+                data.len(),
+                &mut image_sys,
+                &swizzle.into_sys(),
+                0,
             )
         })?;
 
-        unsafe { out.data.set_len(size) };
+        for layer in &mut out.data {
+            unsafe { layer.set_len(size_2d) };
+        }
 
         Ok(out)
     }
@@ -618,9 +633,6 @@ bitflags::bitflags! {
     pub struct Flags: std::os::raw::c_uint {
         /// Disable compression support.
         const DECOMPRESS_ONLY  = astcenc_sys::ASTCENC_FLG_DECOMPRESS_ONLY;
-        /// Treat all channels independently for the purposes of error calculation
-        /// (can result in higher quality for images where the channels correlate poorly)
-        const MAP_MASK         = astcenc_sys::ASTCENC_FLG_MAP_MASK;
         /// Treat the image as a 2-component normal map for the purposes of error calculation.
         /// Z will always be recalculated.
         const MAP_NORMAL       = astcenc_sys::ASTCENC_FLG_MAP_NORMAL;
@@ -649,14 +661,46 @@ impl Default for Flags {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn linked_correctly() {
-        let mut img = super::Image::<Vec<u8>>::default();
+    fn basic_works() {
+        let mut img = super::Image::<Vec<Vec<u8>>>::default();
+        let width = 1 + rand::random::<u32>() % 512;
+        let height = 1 + rand::random::<u32>() % 512;
+        let depth = 1 + rand::random::<u32>() % 4;
+        img.extents.x = width;
+        img.extents.y = height;
+        img.extents.z = depth;
+        img.data.resize_with(img.extents.z as usize, || {
+            (0..width * height * 4)
+                .map(|_| rand::random::<u8>())
+                .collect::<Vec<u8>>()
+        });
 
         let mut ctx = super::Context::default();
         let swz = super::Swizzle::rgba();
 
         let data = ctx.compress(&img, swz).unwrap();
 
-        ctx.decompress_into(&data, &mut img, swz).unwrap();
+        let img2 = ctx.decompress(&data, img.extents, swz).unwrap();
+
+        assert_eq!(img.extents, img2.extents);
+        assert_eq!(img.data.len(), img2.data.len());
+        assert!(img
+            .data
+            .iter()
+            .zip(img2.data.iter())
+            .all(|(a, b)| a.len() == b.len()));
+
+        // ASTC being a lossy compression algorithm, we can't compare the data between the two
+        // images, but we make sure that the two images are somewhat close.
+        assert!(
+            img.data
+                .iter()
+                .flatten()
+                .zip(img2.data.iter().flatten())
+                .map(|(px1, px2)| px1.abs_diff(*px2) as f32 / u8::MAX as f32)
+                .sum::<f32>()
+                / ((width * height * depth) as f32)
+                < 0.5
+        );
     }
 }
