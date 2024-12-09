@@ -9,11 +9,13 @@ use std::path::Path;
 fn main() {
     // Load image
     // Image source: https://polyhaven.com/a/rocky_terrain
-    let rgb_img = image::open("examples/rocky_terrain_diff_1k.png").unwrap();
+    let rgba_img = image::open("examples/rocky_terrain_diff_1k.png")
+        .unwrap()
+        .to_rgba8()
+        .to_vec();
     let (width, height) = rgb_img.dimensions();
     println!("Width is {}", width);
     println!("Height is {}", height);
-    let rgba_img = rgb_img.to_rgba8().to_vec();
 
     // Get in desired format
     let img_array = [rgba_img];
