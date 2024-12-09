@@ -648,7 +648,7 @@ bitflags::bitflags! {
 
 impl Flags {
     fn into_sys(self) -> std::os::raw::c_uint {
-        self.bits
+        self.bits()
     }
 }
 
