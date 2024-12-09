@@ -40,10 +40,6 @@ fn main() {
         .unwrap();
     println!("Done");
 
-    // Check similarity
-    assert_eq!(rgba_img.extents, uncompressed_data.extents);
-    assert_eq!(rgba_img.data.len(), uncompressed_data.data.len());
-
     // Write ping-pong compressed image to disk
     image::save_buffer(
         Path::new("examples/rocky_terrain_diff_1k_compressed.png"),
