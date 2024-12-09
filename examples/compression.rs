@@ -13,7 +13,7 @@ fn main() {
         .unwrap()
         .to_rgba8()
         .to_vec();
-    let (width, height) = rgb_img.dimensions();
+    let (width, height) = rgba_img.dimensions();
     println!("Width is {}", width);
     println!("Height is {}", height);
 
