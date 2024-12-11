@@ -3,7 +3,6 @@ use astcenc_rs::Extents;
 use astcenc_rs::Profile;
 use astcenc_rs::PRESET_FASTEST;
 use image::ColorType;
-use image::GenericImageView;
 use std::path::Path;
 
 fn main() {
@@ -11,8 +10,7 @@ fn main() {
     // Image source: https://polyhaven.com/a/rocky_terrain
     let rgba_img = image::open("examples/rocky_terrain_diff_1k.png")
         .unwrap()
-        .to_rgba8()
-        .to_vec();
+        .to_rgba8();
     let (width, height) = rgba_img.dimensions();
     println!("Width is {}", width);
     println!("Height is {}", height);
