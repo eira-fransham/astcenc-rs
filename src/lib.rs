@@ -530,7 +530,7 @@ impl Context {
 
         unsafe { out.set_len(bytes) };
 
-        self.reset()?;
+        self.compress_reset()?;
 
         Ok(out)
     }
@@ -570,7 +570,11 @@ impl Context {
                 &swizzle.into_sys(),
                 0,
             )
-        })
+        })?;
+
+        self.decompress_reset()?;
+
+        Ok(())
     }
 
     /// Decompress an image. The metadata is not stored in the compressed data itself, and should be
@@ -620,22 +624,31 @@ impl Context {
             unsafe { layer.set_len(size_2d) };
         }
 
+        self.decompress_reset()?;
+
         Ok(out)
     }
 
-    fn reset(&mut self) -> Result<(), Error> {
+    fn compress_reset(&mut self) -> Result<(), Error> {
         error_code_to_result(unsafe { astcenc_sys::astcenc_compress_reset(self.inner.as_mut()) })
+    }
+
+    fn decompress_reset(&mut self) -> Result<(), Error> {
+        error_code_to_result(unsafe { astcenc_sys::astcenc_decompress_reset(self.inner.as_mut()) })
     }
 }
 
 bitflags::bitflags! {
     /// Configuration flags for the context.
     pub struct Flags: std::os::raw::c_uint {
-        /// Disable compression support.
-        const DECOMPRESS_ONLY  = astcenc_sys::ASTCENC_FLG_DECOMPRESS_ONLY;
         /// Treat the image as a 2-component normal map for the purposes of error calculation.
         /// Z will always be recalculated.
         const MAP_NORMAL       = astcenc_sys::ASTCENC_FLG_MAP_NORMAL;
+        /// The decode_unorm8 decode mode rounds differently to the decode_fp16 decode mode, so enabling this
+        /// flag during compression will allow the compressor to use the correct rounding when selecting
+        /// encodings. This will improve the compressed image quality if your application is using the
+        /// decode_unorm8 decode mode, but will reduce image quality if using decode_fp16.
+        const DECODE_UNORM8 = astcenc_sys::ASTCENC_FLG_USE_DECODE_UNORM8;
         /// Weight any error in the RGB components by the A component, which leads to better
         /// quality in areas with higher alpha by comparison.
         const USE_ALPHA_WEIGHT = astcenc_sys::ASTCENC_FLG_USE_ALPHA_WEIGHT;
@@ -643,6 +656,24 @@ bitflags::bitflags! {
         /// best used for normal maps. Not all input types support perceptual error calculation
         /// at all.
         const USE_PERCEPTUAL   = astcenc_sys::ASTCENC_FLG_USE_PERCEPTUAL;
+        /// Disable compression support. Uses less memory.
+        const DECOMPRESS_ONLY  = astcenc_sys::ASTCENC_FLG_DECOMPRESS_ONLY;
+        /// Only guarantee decompression of images which have been compressed using the current context.
+        /// This enables additional optimizations.
+        const SELF_DECOMPRESS_ONLY = astcenc_sys::ASTCENC_FLG_SELF_DECOMPRESS_ONLY;
+        /// Input data will be treated as HDR data that has been stored in an LDR RGBM-encoded wrapper
+        /// format. Data must be preprocessed by the user to be in LDR RGBM format before calling the
+        /// compression function, this flag is only used to control the use of RGBM-specific heuristics and
+        /// error metrics.
+        const MAP_RGBM = astcenc_sys::ASTCENC_FLG_MAP_RGBM;
+    }
+}
+
+impl Drop for Context{
+    fn drop(&mut self) {
+        unsafe{
+            astcenc_sys::astcenc_context_free(self.inner.as_ptr())
+        };
     }
 }
 
