@@ -12,6 +12,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+num_cpus = "1.16"
 astcenc-sys = "0.1"
 bitflags = "2.6"
 half = "2"

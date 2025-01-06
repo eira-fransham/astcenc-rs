@@ -180,6 +180,7 @@ pub struct ConfigBuilder {
     profile: Profile,
     preset: Preset,
     block_size: Extents,
+    flags: Flags,
 }
 
 impl Default for ConfigBuilder {
@@ -188,6 +189,7 @@ impl Default for ConfigBuilder {
             profile: Profile::default(),
             preset: Preset::default(),
             block_size: Extents::default_block_size(),
+            flags: Flags::default(),
         }
     }
 }
@@ -207,6 +209,18 @@ impl ConfigBuilder {
     /// Set the color profile, i.e. the accepted range of the input components.
     pub fn with_profile(mut self, profile: Profile) -> Self {
         self.profile(profile);
+        self
+    }
+
+    /// Set the flags to use when initializing `astcenc`.
+    pub fn flags(&mut self, flags: Flags) -> &mut Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Set the flags to use when initializing `astcenc`.
+    pub fn with_flags(mut self, flags: Flags) -> Self {
+        self.flags(flags);
         self
     }
 
@@ -251,7 +265,7 @@ impl ConfigBuilder {
                 self.block_size.y,
                 self.block_size.z,
                 self.preset.0,
-                Flags::default().into_sys(),
+                self.flags.into_sys(),
                 cfg.as_mut_ptr(),
             )
         })?;
@@ -451,22 +465,33 @@ impl Swizzle {
 
 impl Context {
     /// Create a new context from the given config (see `ConfigBuilder` for more information on this
-    /// config). Returns an error in the case that the config is invalid or the context could not be
+    /// config), and sets the number of threads that the internal encoder/decoder will use. See
+    /// [`Context::new`], which does the same thing but automatically guesses the correct thread count
+    /// by trying to use 8 threads but falling back to the number of cores if it is less than
+    /// 8. Returns an error in the case that the config is invalid or the context could not be
     /// allocated.
-    pub fn new(config: Config) -> Result<Self, Error> {
-        // TODO: Do this properly somehow
-        const THREADS: usize = 1;
-
+    pub fn with_threads(threads: usize, config: Config) -> Result<Self, Error> {
         let mut cfg: MaybeUninit<*mut astcenc_sys::astcenc_context> = MaybeUninit::uninit();
 
         error_code_to_result(unsafe {
-            astcenc_sys::astcenc_context_alloc(&config.inner, THREADS as _, cfg.as_mut_ptr())
+            astcenc_sys::astcenc_context_alloc(&config.inner, threads as _, cfg.as_mut_ptr())
         })?;
 
         Ok(Self {
             inner: unsafe { NonNull::new(cfg.assume_init()).ok_or(Error::Unknown)? },
             config,
         })
+    }
+
+    /// Create a new context from the given config (see `ConfigBuilder` for more information on this
+    /// config). Returns an error in the case that the config is invalid or the context could not be
+    /// allocated.
+    pub fn new(config: Config) -> Result<Self, Error> {
+        const MAX_THREADS: usize = 8;
+
+        let threads = num_cpus::get().min(MAX_THREADS);
+
+        Self::with_threads(threads, config)
     }
 
     /// Compress the given image, returning a byte vector that can be sent to the GPU.
@@ -636,6 +661,7 @@ impl Context {
 }
 
 bitflags::bitflags! {
+    #[derive(Copy, Clone, PartialEq, Eq)]
     /// Configuration flags for the context.
     pub struct Flags: std::os::raw::c_uint {
         /// Treat the image as a 2-component normal map for the purposes of error calculation.
@@ -666,11 +692,9 @@ bitflags::bitflags! {
     }
 }
 
-impl Drop for Context{
+impl Drop for Context {
     fn drop(&mut self) {
-        unsafe{
-            astcenc_sys::astcenc_context_free(self.inner.as_ptr())
-        };
+        unsafe { astcenc_sys::astcenc_context_free(self.inner.as_ptr()) };
     }
 }
 
@@ -688,7 +712,7 @@ impl Default for Flags {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ConfigBuilder, Context, DataType, Extents, Image, Preset, Swizzle};
+    use crate::{ConfigBuilder, Context, DataType, Extents, Flags, Image, Preset, Swizzle};
     use all_asserts::assert_lt;
     use average::Mean;
     use half::f16;
@@ -697,6 +721,9 @@ mod tests {
     trait TestType: DataType + Sized {
         fn abs_diff(this: &[Self], other: &[Self]) -> f32;
         fn make_rand<T: Rng>(rand: &mut T) -> Self;
+        fn flags() -> Flags {
+            Flags::default() | Flags::SELF_DECOMPRESS_ONLY
+        }
     }
 
     impl TestType for u8 {
@@ -710,6 +737,10 @@ mod tests {
 
         fn make_rand<T: Rng>(rand: &mut T) -> Self {
             rand.gen()
+        }
+
+        fn flags() -> Flags {
+            Flags::default() | Flags::SELF_DECOMPRESS_ONLY | Flags::DECODE_UNORM8
         }
     }
 
@@ -753,8 +784,14 @@ mod tests {
             data: &[IMAGE_BYTES][..],
         };
 
-        let mut ctx =
-            Context::new(ConfigBuilder::new().with_preset(preset).build().unwrap()).unwrap();
+        let mut ctx = Context::new(
+            ConfigBuilder::new()
+                .with_flags(u8::flags())
+                .with_preset(preset)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let swz = Swizzle::rgba();
 
         let data = ctx.compress(&img, swz).unwrap();
@@ -802,8 +839,14 @@ mod tests {
                 .collect::<Vec<T>>()
         });
 
-        let mut ctx =
-            Context::new(ConfigBuilder::new().with_preset(preset).build().unwrap()).unwrap();
+        let mut ctx = Context::new(
+            ConfigBuilder::new()
+                .with_flags(T::flags())
+                .with_preset(preset)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let swz = Swizzle::rgba();
 
         let data = ctx.compress(&img, swz).unwrap();
@@ -909,16 +952,16 @@ mod tests {
         };
 
         const TOLERANCE_FLOAT: f64 = 0.31;
-        const TOLERANCE_U8: f64 = 1.12;
 
         mod image_3d {
             use crate::make_compress_tests;
             use crate::Extents;
 
             const EXTENTS: Extents = super::EXTENTS_3D;
+            const TOLERANCE_U8: f64 = 0.615;
 
             mod type_u8 {
-                super::make_compress_tests!(u8, super::EXTENTS, super::super::TOLERANCE_U8);
+                super::make_compress_tests!(u8, super::EXTENTS, super::TOLERANCE_U8);
             }
 
             mod type_f32 {
@@ -939,9 +982,10 @@ mod tests {
             use crate::Extents;
 
             const EXTENTS: Extents = super::EXTENTS_2D;
+            const TOLERANCE_U8: f64 = 0.315;
 
             mod type_u8 {
-                super::make_compress_tests!(u8, super::EXTENTS, super::super::TOLERANCE_U8);
+                super::make_compress_tests!(u8, super::EXTENTS, super::TOLERANCE_U8);
             }
 
             mod type_f32 {
@@ -971,7 +1015,7 @@ mod tests {
 
         #[test]
         fn test_medium() {
-            crate::tests::test_preset_image(crate::PRESET_MEDIUM, 0.00570);
+            crate::tests::test_preset_image(crate::PRESET_MEDIUM, 0.00565);
         }
 
         #[test]
