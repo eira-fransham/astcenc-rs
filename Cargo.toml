@@ -1,20 +1,22 @@
 [package]
 name = "astcenc-rs"
-version = "0.1.0"
-homepage = "https://github.com/Vurich/astcenc-sys"
-repository = "https://github.com/Vurich/astcenc-sys"
+version = "0.1.1"
+homepage = "https://github.com/eira-fransham/astcenc-sys"
+repository = "https://github.com/eira-fransham/astcenc-sys"
 documentation = "https://docs.rs/astcenc-sys"
-description = "Idiomatic Rust bindings to the official ASTC encoder library from ARM "
+description = "Idiomatic Rust bindings to the official ASTC encoder library from ARM"
 license = "Unlicense"
-authors = ["Jef <jackefransham@gmail.com>"]
-edition = "2018"
+authors = ["Eira <jackefransham@gmail.com>"]
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 astcenc-sys = "0.1"
-bitflags = "1.2"
-half = "1.6"
+bitflags = "2.6"
+half = "2"
 
 [dev-dependencies]
-rand = "0.8.5"
+rand = "0.8"
+all_asserts = "2.3"
+average = "0.15"

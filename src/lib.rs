@@ -494,12 +494,9 @@ impl Context {
             return Err(Error::BadParam);
         }
 
-        let blocks_x =
-            (image.extents.x + self.config.inner.block_x - 1) / self.config.inner.block_x;
-        let blocks_y =
-            (image.extents.y + self.config.inner.block_y - 1) / self.config.inner.block_y;
-        let blocks_z =
-            (image.extents.z + self.config.inner.block_z - 1) / self.config.inner.block_z;
+        let blocks_x = image.extents.x.div_ceil(self.config.inner.block_x);
+        let blocks_y = image.extents.y.div_ceil(self.config.inner.block_y);
+        let blocks_z = image.extents.z.div_ceil(self.config.inner.block_z);
 
         let bytes = blocks_x as usize * blocks_y as usize * blocks_z as usize * BYTES_PER_BLOCK;
         let mut out = Vec::with_capacity(bytes);
@@ -648,7 +645,7 @@ bitflags::bitflags! {
 
 impl Flags {
     fn into_sys(self) -> std::os::raw::c_uint {
-        self.bits
+        self.bits()
     }
 }
 
@@ -660,23 +657,74 @@ impl Default for Flags {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn basic_works() {
-        let mut img = super::Image::<Vec<Vec<u8>>>::default();
-        let width = 1 + rand::random::<u32>() % 512;
-        let height = 1 + rand::random::<u32>() % 512;
-        let depth = 1 + rand::random::<u32>() % 4;
-        img.extents.x = width;
-        img.extents.y = height;
-        img.extents.z = depth;
-        img.data.resize_with(img.extents.z as usize, || {
-            (0..width * height * 4)
-                .map(|_| rand::random::<u8>())
-                .collect::<Vec<u8>>()
-        });
+    use crate::{ConfigBuilder, Context, DataType, Extents, Image, Preset, Swizzle};
+    use all_asserts::assert_lt;
+    use average::Mean;
+    use half::f16;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
-        let mut ctx = super::Context::default();
-        let swz = super::Swizzle::rgba();
+    trait TestType: DataType + Sized {
+        fn abs_diff(this: &[Self], other: &[Self]) -> f32;
+        fn make_rand<T: Rng>(rand: &mut T) -> Self;
+    }
+
+    impl TestType for u8 {
+        fn abs_diff(this: &[Self], other: &[Self]) -> f32 {
+            this.iter()
+                .zip(other)
+                .map(|(&a, &b)| ((a as f32 - b as f32) / u8::MAX as f32).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        }
+
+        fn make_rand<T: Rng>(rand: &mut T) -> Self {
+            rand.gen()
+        }
+    }
+
+    impl TestType for f32 {
+        fn abs_diff(this: &[Self], other: &[Self]) -> f32 {
+            this.iter()
+                .zip(other)
+                .map(|(&a, &b)| (a - b).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        }
+        fn make_rand<T: Rng>(rand: &mut T) -> Self {
+            rand.gen()
+        }
+    }
+
+    impl TestType for f16 {
+        fn abs_diff(this: &[Self], other: &[Self]) -> f32 {
+            this.iter()
+                .zip(other)
+                .map(|(&a, &b)| (a.to_f32() - b.to_f32()).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        }
+        fn make_rand<T: Rng>(rand: &mut T) -> Self {
+            f16::from_f32(rand.gen::<f32>())
+        }
+    }
+
+    fn test_preset_image(preset: Preset, tolerance: f64) {
+        const IMAGE_BYTES: &[u8] =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/image.raw"));
+        const IMAGE_EXTENTS: Extents = Extents {
+            x: 640,
+            y: 975,
+            z: 1,
+        };
+
+        let img = Image {
+            extents: IMAGE_EXTENTS,
+            data: &[IMAGE_BYTES][..],
+        };
+
+        let mut ctx =
+            Context::new(ConfigBuilder::new().with_preset(preset).build().unwrap()).unwrap();
+        let swz = Swizzle::rgba();
 
         let data = ctx.compress(&img, swz).unwrap();
 
@@ -684,23 +732,230 @@ mod tests {
 
         assert_eq!(img.extents, img2.extents);
         assert_eq!(img.data.len(), img2.data.len());
-        assert!(img
-            .data
-            .iter()
-            .zip(img2.data.iter())
-            .all(|(a, b)| a.len() == b.len()));
+        for datas in img.data.iter().zip(img2.data.iter()) {
+            // Assert that we have a flat u8 array, just to make sure this stops compiling
+            // if the inner data is converted to a 2D array.
+            let (original_data, decompressed_data): (&&[u8], &Vec<u8>) = datas;
+            assert_eq!(original_data.len(), decompressed_data.len());
+        }
 
         // ASTC being a lossy compression algorithm, we can't compare the data between the two
         // images, but we make sure that the two images are somewhat close.
-        assert!(
+        assert_lt!(
             img.data
                 .iter()
-                .flatten()
-                .zip(img2.data.iter().flatten())
-                .map(|(px1, px2)| px1.abs_diff(*px2) as f32 / u8::MAX as f32)
-                .sum::<f32>()
-                / ((width * height * depth) as f32)
-                < 0.5
+                .flat_map(|frame| frame.chunks(4))
+                .zip(img2.data.iter().flat_map(|frame| frame.chunks(4)))
+                .map(|(px1, px2)| TestType::abs_diff(px1, px2) as f64)
+                .collect::<Mean>()
+                .mean(),
+            tolerance
         );
+    }
+
+    fn test_preset_noise<T>(preset: Preset, extents: Extents, tolerance: f64)
+    where
+        T: TestType,
+    {
+        let mut img = Image::<Vec<Vec<T>>>::default();
+        let mut rand = StdRng::from_seed(Default::default());
+        img.extents = extents;
+        let Extents {
+            x: width,
+            y: height,
+            z: depth,
+        } = extents;
+        img.data.resize_with(depth as usize, || {
+            (0..width * height * 4)
+                .map(|_| T::make_rand(&mut rand))
+                .collect::<Vec<T>>()
+        });
+
+        let mut ctx =
+            Context::new(ConfigBuilder::new().with_preset(preset).build().unwrap()).unwrap();
+        let swz = Swizzle::rgba();
+
+        let data = ctx.compress(&img, swz).unwrap();
+
+        let img2 = ctx.decompress(&data, img.extents, swz).unwrap();
+
+        assert_eq!(img.extents, img2.extents);
+        assert_eq!(img.data.len(), img2.data.len());
+        for datas in img.data.iter().zip(img2.data.iter()) {
+            // Assert that we have a flat u8 array, just to make sure this stops compiling
+            // if the inner data is converted to a 2D array.
+            let (original_data, decompressed_data): (&Vec<T>, &Vec<T>) = datas;
+            assert_eq!(original_data.len(), decompressed_data.len());
+        }
+
+        // ASTC being a lossy compression algorithm, we can't compare the data between the two
+        // images, but we make sure that the two images are somewhat close.
+        assert_lt!(
+            img.data
+                .iter()
+                .flat_map(|frame| frame.chunks(4))
+                .zip(img2.data.iter().flat_map(|frame| frame.chunks(4)))
+                .map(|(px1, px2)| T::abs_diff(px1, px2) as f64)
+                .collect::<Mean>()
+                .mean(),
+            tolerance
+        );
+    }
+
+    /// Autogenerate tests for a specific type and image dimensions
+    #[macro_export]
+    macro_rules! make_compress_tests {
+        ($data:ty, $extents:expr, $tolerance:expr) => {
+            #[test]
+            fn test_fastest() {
+                $crate::tests::test_preset_noise::<$data>(
+                    $crate::PRESET_FASTEST,
+                    $extents,
+                    $tolerance,
+                );
+            }
+
+            #[test]
+            fn test_fast() {
+                $crate::tests::test_preset_noise::<$data>(
+                    $crate::PRESET_FAST,
+                    $extents,
+                    $tolerance,
+                );
+            }
+
+            #[test]
+            fn test_medium() {
+                $crate::tests::test_preset_noise::<$data>(
+                    $crate::PRESET_MEDIUM,
+                    $extents,
+                    $tolerance,
+                );
+            }
+
+            #[test]
+            fn test_thorough() {
+                $crate::tests::test_preset_noise::<$data>(
+                    $crate::PRESET_THOROUGH,
+                    $extents,
+                    $tolerance,
+                );
+            }
+
+            #[test]
+            fn test_very_thorough() {
+                $crate::tests::test_preset_noise::<$data>(
+                    $crate::PRESET_VERY_THOROUGH,
+                    $extents,
+                    $tolerance,
+                );
+            }
+
+            #[test]
+            fn test_exhaustive() {
+                $crate::tests::test_preset_noise::<$data>(
+                    $crate::PRESET_EXHAUSTIVE,
+                    $extents,
+                    $tolerance,
+                );
+            }
+        };
+    }
+
+    mod noise {
+        use crate::Extents;
+
+        const EXTENTS_3D: Extents = Extents {
+            x: 256,
+            y: 256,
+            z: 4,
+        };
+
+        const EXTENTS_2D: Extents = Extents {
+            x: 512,
+            y: 512,
+            z: 1,
+        };
+
+        const TOLERANCE_FLOAT: f64 = 0.31;
+        const TOLERANCE_U8: f64 = 1.12;
+
+        mod image_3d {
+            use crate::make_compress_tests;
+            use crate::Extents;
+
+            const EXTENTS: Extents = super::EXTENTS_3D;
+
+            mod type_u8 {
+                super::make_compress_tests!(u8, super::EXTENTS, super::super::TOLERANCE_U8);
+            }
+
+            mod type_f32 {
+                super::make_compress_tests!(f32, super::EXTENTS, super::super::TOLERANCE_FLOAT);
+            }
+
+            mod type_f16 {
+                super::make_compress_tests!(
+                    half::f16,
+                    super::EXTENTS,
+                    super::super::TOLERANCE_FLOAT
+                );
+            }
+        }
+
+        mod image_2d {
+            use crate::make_compress_tests;
+            use crate::Extents;
+
+            const EXTENTS: Extents = super::EXTENTS_2D;
+
+            mod type_u8 {
+                super::make_compress_tests!(u8, super::EXTENTS, super::super::TOLERANCE_U8);
+            }
+
+            mod type_f32 {
+                super::make_compress_tests!(f32, super::EXTENTS, super::super::TOLERANCE_FLOAT);
+            }
+
+            mod type_f16 {
+                super::make_compress_tests!(
+                    half::f16,
+                    super::EXTENTS,
+                    super::super::TOLERANCE_FLOAT
+                );
+            }
+        }
+    }
+
+    mod real_image {
+        #[test]
+        fn test_fastest() {
+            crate::tests::test_preset_image(crate::PRESET_FASTEST, 0.00680);
+        }
+
+        #[test]
+        fn test_fast() {
+            crate::tests::test_preset_image(crate::PRESET_FAST, 0.00665);
+        }
+
+        #[test]
+        fn test_medium() {
+            crate::tests::test_preset_image(crate::PRESET_MEDIUM, 0.00570);
+        }
+
+        #[test]
+        fn test_thorough() {
+            crate::tests::test_preset_image(crate::PRESET_THOROUGH, 0.00540);
+        }
+
+        #[test]
+        fn test_very_thorough() {
+            crate::tests::test_preset_image(crate::PRESET_VERY_THOROUGH, 0.00535);
+        }
+
+        #[test]
+        fn test_exhaustive() {
+            crate::tests::test_preset_image(crate::PRESET_EXHAUSTIVE, 0.00531);
+        }
     }
 }
