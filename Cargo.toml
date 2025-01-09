@@ -1,6 +1,7 @@
 [package]
 name = "astcenc-rs"
 version = "0.1.1"
+readme = "README.md"
 homepage = "https://github.com/eira-fransham/astcenc-sys"
 repository = "https://github.com/eira-fransham/astcenc-sys"
 documentation = "https://docs.rs/astcenc-sys"
