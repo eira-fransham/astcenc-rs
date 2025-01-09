@@ -8,7 +8,7 @@ use std::path::Path;
 fn main() {
     // Load image
     // Image source: https://polyhaven.com/a/rocky_terrain
-    let rgba_img = image::open("examples/rocky_terrain_diff_1k.png")
+    let rgba_img = image::open("assets/rocky_terrain_diff_1k.png")
         .unwrap()
         .to_rgba8();
     let (width, height) = rgba_img.dimensions();
@@ -42,7 +42,7 @@ fn main() {
 
     // Write ping-pong compressed image to disk
     image::save_buffer(
-        Path::new("examples/rocky_terrain_diff_1k_compressed.png"),
+        Path::new("assets/rocky_terrain_diff_1k_compressed.png"),
         uncompressed_data.data[0].as_slice(),
         width,
         height,
