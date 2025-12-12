@@ -736,7 +736,7 @@ mod tests {
         }
 
         fn make_rand<T: Rng>(rand: &mut T) -> Self {
-            rand.gen()
+            rand.random()
         }
 
         fn flags() -> Flags {
@@ -753,7 +753,7 @@ mod tests {
                 .sqrt()
         }
         fn make_rand<T: Rng>(rand: &mut T) -> Self {
-            rand.gen()
+            rand.random()
         }
     }
 
@@ -766,7 +766,7 @@ mod tests {
                 .sqrt()
         }
         fn make_rand<T: Rng>(rand: &mut T) -> Self {
-            f16::from_f32(rand.gen::<f32>())
+            f16::from_f32(rand.random::<f32>())
         }
     }
 
